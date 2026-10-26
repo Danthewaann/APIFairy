@@ -34,11 +34,8 @@ def schema_name_resolver(schema):
         name += 'Update'
     return name
 
-def update_operation(operation, view_func, rule, blueprint, method, methods):
-    return operation
-
 class APIFairy:
-    def __init__(self, app=None, schema_name_resolver_func=None, operation_id_resolver_func=None):
+    def __init__(self, app=None):
         self.title = None
         self.version = None
         self.apispec_path = None
@@ -47,12 +44,14 @@ class APIFairy:
         self.tags = None
 
         self.apispec_callback = None
+        self.operation_callback = None
+        self.schema_name_resolver = schema_name_resolver
         self.error_handler_callback = self.default_error_handler
         self._apispec = None
         if app is not None:  # pragma: no cover
-            self.init_app(app, schema_name_resolver_func, operation_id_resolver_func)
+            self.init_app(app)
 
-    def init_app(self, app, schema_name_resolver_func=None, update_operation_func=None):
+    def init_app(self, app):
         self.title = app.config.get('APIFAIRY_TITLE', 'No title')
         self.version = app.config.get('APIFAIRY_VERSION', 'No version')
         self.apispec_path = app.config.get('APIFAIRY_APISPEC_PATH',
@@ -64,8 +63,6 @@ class APIFairy:
         self.ui_path = app.config.get('APIFAIRY_UI_PATH', '/docs')
         self.ui_decorators = app.config.get('APIFAIRY_UI_DECORATORS', [])
         self.tags = app.config.get('APIFAIRY_TAGS')
-        self.schema_name_resolver = schema_name_resolver_func or schema_name_resolver
-        self.update_operation = update_operation_func or update_operation
 
         bp = Blueprint('apifairy', __name__, template_folder='templates')
 
@@ -97,6 +94,10 @@ class APIFairy:
 
     def process_apispec(self, f):
         self.apispec_callback = f
+        return f
+
+    def update_operation(self, f):
+        self.operation_callback = f
         return f
 
     def error_handler(self, f):
@@ -361,11 +362,13 @@ class APIFairy:
                             'roles']
                     }]
 
-                blueprint = None
-                if '.' in rule.endpoint:
-                    tag = rule.endpoint.rsplit('.', 1)[0]
-                    blueprint = current_app.blueprints.get(tag)
-                operations[method.lower()] = self.update_operation(operation, view_func, rule, blueprint, method, methods)
+                if self.operation_callback:
+                    blueprint = None
+                    if "." in rule.endpoint:
+                        tag = rule.endpoint.rsplit(".", 1)[0]
+                        blueprint = current_app.blueprints.get(tag)
+                    self.operation_callback(operation, view_func, rule, blueprint, method)
+                operations[method.lower()] = operation
 
             if is_endpoint:
                 path_arguments = re.findall(r'<(([^<:]+:)?([^>]+))>',
