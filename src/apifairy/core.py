@@ -26,9 +26,32 @@ from apifairy.decorators import _webhooks
 from apifairy.exceptions import ValidationError
 from apifairy import fields as apifairy_fields
 
+def schema_name_resolver(schema):
+    name = schema.__class__.__name__
+    if name.endswith("Schema"):
+        name = name[:-6] or name
+    if schema.partial:
+        name += 'Update'
+    return name
+
+def blueprint_tag_resolver(name, blueprint=None, module=None):
+    tag = {"name": name.title()}
+    if module is not None and module.__doc__:
+        tag["description"] = module.__doc__.strip()
+    return tag
+
+def operation_id_resolver(view_func, rule, method, methods):
+    operation_id = rule.endpoint.replace('.', '_')
+    if len(methods) > 1:
+        operation_id = method.lower() + '_' + operation_id
+
+    return operation_id
+
+def update_operation(operation, view_func, rule, blueprint, method, methods):
+    return operation
 
 class APIFairy:
-    def __init__(self, app=None):
+    def __init__(self, app=None, schema_name_resolver_func=None, blueprint_tag_resolver_func=None, operation_id_resolver_func=None, update_operation_func=None):
         self.title = None
         self.version = None
         self.apispec_path = None
@@ -40,9 +63,9 @@ class APIFairy:
         self.error_handler_callback = self.default_error_handler
         self._apispec = None
         if app is not None:  # pragma: no cover
-            self.init_app(app)
+            self.init_app(app, schema_name_resolver_func, blueprint_tag_resolver_func, operation_id_resolver_func, update_operation_func)
 
-    def init_app(self, app):
+    def init_app(self, app, schema_name_resolver_func=None, blueprint_tag_resolver_func=None, operation_id_resolver_func=None, update_operation_func=None):
         self.title = app.config.get('APIFAIRY_TITLE', 'No title')
         self.version = app.config.get('APIFAIRY_VERSION', 'No version')
         self.apispec_path = app.config.get('APIFAIRY_APISPEC_PATH',
@@ -54,6 +77,10 @@ class APIFairy:
         self.ui_path = app.config.get('APIFAIRY_UI_PATH', '/docs')
         self.ui_decorators = app.config.get('APIFAIRY_UI_DECORATORS', [])
         self.tags = app.config.get('APIFAIRY_TAGS')
+        self.schema_name_resolver = schema_name_resolver_func or schema_name_resolver
+        self.blueprint_tag_resolver = blueprint_tag_resolver_func or blueprint_tag_resolver
+        self.operation_id_resolver = operation_id_resolver_func or operation_id_resolver
+        self.update_operation = update_operation_func or update_operation
 
         bp = Blueprint('apifairy', __name__, template_folder='templates')
 
@@ -103,14 +130,6 @@ class APIFairy:
         return self._apispec
 
     def _generate_apispec(self):
-        def resolver(schema):
-            name = schema.__class__.__name__
-            if name.endswith("Schema"):
-                name = name[:-6] or name
-            if schema.partial:
-                name += 'Update'
-            return name
-
         # info object
         info = {}
         module_name = current_app.import_name
@@ -133,22 +152,19 @@ class APIFairy:
             tag_names = []
             for rule in current_app.url_map.iter_rules():
                 view_func = current_app.view_functions[rule.endpoint]
-                if hasattr(view_func, '_spec'):
-                    if '.' in rule.endpoint:
-                        blueprint = rule.endpoint.rsplit('.', 1)[0]
-                        if blueprint not in tag_names:  # pragma: no branch
-                            tag_names.append(blueprint)
+                if hasattr(view_func, '_spec') and '.' in rule.endpoint:
+                    blueprint = rule.endpoint.rsplit('.', 1)[0]
+                    if blueprint not in tag_names:  # pragma: no branch
+                        tag_names.append(blueprint)
+
         tags = {}
         for name, blueprint in current_app.blueprints.items():
             if name not in tag_names:
                 continue
             module = sys.modules[blueprint.import_name]
-            tag = {'name': name.title()}
-            if module.__doc__:  # pragma: no cover
-                tag['description'] = module.__doc__.strip()
-            tags[name] = tag
+            tags[name] = self.blueprint_tag_resolver(name, blueprint, module)
         tag_list = [tags[name] for name in tag_names]
-        ma_plugin = MarshmallowPlugin(schema_name_resolver=resolver)
+        ma_plugin = MarshmallowPlugin(schema_name_resolver=self.schema_name_resolver)
         apispec_version = self.apispec_version
         if apispec_version is None:
             apispec_version = '3.1.0' if _webhooks else '3.0.3'
@@ -250,18 +266,15 @@ class APIFairy:
                 continue
             if '.' in rule.endpoint:
                 tag, endpoint = rule.endpoint.rsplit('.', 1)
-                tag = tag.title()
+                tag = self.blueprint_tag_resolver(tag)["name"]
             else:
                 tag = None
                 endpoint = rule.endpoint
             methods = [method for method in rule.methods
                        if method in ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']]
             for method in methods:
-                operation_id = rule.endpoint.replace('.', '_')
-                if len(methods) > 1:
-                    operation_id = method.lower() + '_' + operation_id
                 operation = {
-                    'operationId': operation_id,
+                    'operationId': self.operation_id_resolver(view_func, rule, method, methods),
                     'parameters': [
                         {'in': location, 'schema': schema}
                         for schema, location in view_func._spec.get('args', [])
@@ -355,7 +368,8 @@ class APIFairy:
                         security[view_func._spec['auth']]: view_func._spec[
                             'roles']
                     }]
-                operations[method.lower()] = operation
+
+                operations[method.lower()] = self.update_operation(operation, view_func, rule, blueprint, method, methods)
 
             if is_endpoint:
                 path_arguments = re.findall(r'<(([^<:]+:)?([^>]+))>',
